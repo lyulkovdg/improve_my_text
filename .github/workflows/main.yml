@@ -1,0 +1,83 @@
+name: AI Improve Documentation
+
+on:
+  push:
+    paths: ['docs/*.md']
+  workflow_dispatch:
+
+jobs:
+  improve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      models: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: AI Processing - generate structured files
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TEXT=$(cat docs/paint-manual.md)
+          PROMPT=$(cat .github/prompts/improve-docs.md)
+          FULL_PROMPT="${PROMPT}"$'\n\n'"${TEXT}"
+
+          HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
+            -X POST "https://models.inference.ai.azure.com/chat/completions" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg content "$FULL_PROMPT" '{
+              model: "gpt-4o-mini",
+              messages: [{role: "user", content: $content}],
+              temperature: 0.3,
+              max_tokens: 8000
+            }')")
+
+          echo "HTTP статус: $HTTP_STATUS"
+          cat response.json
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "Ошибка API" > error.log
+            exit 1
+          fi
+
+          RAW_JSON=$(jq -r '.choices[0].message.content' response.json)
+          CLEAN_JSON=$(echo "$RAW_JSON" | sed -E 's/^```json\s*//; s/```\s*$//')
+
+          echo "$CLEAN_JSON" | jq empty || {
+            echo "Невалидный JSON"
+            exit 1
+          }
+
+          # Создаём папки и файлы
+          for row in $(echo "$CLEAN_JSON" | jq -r '.files[] | @base64'); do
+            _jq() {
+              echo "${row}" | base64 --decode | jq -r "${1}"
+            }
+            path=$(_jq '.path')
+            content=$(_jq '.content')
+            mkdir -p "$(dirname "$path")"
+            echo "$content" > "$path"
+            echo "Создан файл: $path"
+          done
+
+          echo "$CLEAN_JSON" | jq -r '.report // ""' > docs/ai_report.txt
+          echo "$CLEAN_JSON" | jq -r '.recommendations // ""' > docs/ai_recommendations.txt
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "AI: реорганизация документации"
+          title: "Предложение от AI: новая структура документации"
+          branch: "ai-patch-final"
+          base: ${{ github.event.repository.default_branch }}
+          add-paths: |
+            *.md
+            **/*.md
+          body: |
+            ИИ-агент создал структурированную документацию.
+            Файлы разложены по папкам.
+            Отчёт и рекомендации в docs/ai_report.txt и docs/ai_recommendations.txt.
